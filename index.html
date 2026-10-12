@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Circuit Calculator (Python in the browser)</title>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1b1f24; --muted:#5b6570; --accent:#2a5d9f; --border:#d5dae0; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14181d; --card:#1d2329; --text:#e8ecf0; --muted:#9aa5b1; --accent:#6aa5e8; --border:#333c46; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px 16px; background:var(--bg); color:var(--text);
+         font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; line-height:1.5; }
+  main { max-width:560px; margin:0 auto; background:var(--card); border:1px solid var(--border);
+         border-radius:12px; padding:24px; }
+  h1 { margin:0 0 4px; font-size:1.5rem; }
+  .sub { margin:0 0 20px; color:var(--muted); font-size:.95rem; }
+  label { display:block; margin:14px 0 4px; font-weight:600; font-size:.95rem; }
+  select, input { width:100%; padding:10px; font-size:1rem; border:1px solid var(--border);
+                  border-radius:8px; background:var(--bg); color:var(--text); }
+  button { margin-top:18px; padding:10px 18px; font-size:1rem; font-weight:600; border:0;
+           border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:wait; }
+  #result { margin-top:18px; padding:12px; border-radius:8px; background:var(--bg);
+            border:1px solid var(--border); white-space:pre-wrap; font-family:ui-monospace, Consolas, monospace;
+            min-height:3em; }
+  .hint { color:var(--muted); font-size:.85rem; margin-top:6px; }
+  footer { margin-top:20px; color:var(--muted); font-size:.85rem; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Circuit Calculator</h1>
+  <p class="sub">The calculations run in real Python (<code>circuit_calc.py</code>) inside your browser.</p>
+
+  <label for="calc">Calculation</label>
+  <select id="calc"></select>
+
+  <div id="fields"></div>
+  <p class="hint">Prefixes work: p n u m k M G (for example 4.7k or 100u).</p>
+
+  <button id="go" disabled>Loading Python...</button>
+  <div id="result" role="status" aria-live="polite"></div>
+
+  <footer>
+    Source code: <a href="https://github.com/hein0417/circuit-calculator">github.com/hein0417/circuit-calculator</a>.
+    Python runs in the browser with <a href="https://pyodide.org">Pyodide</a>.
+  </footer>
+</main>
+
+<script>
+const CALCS = {
+  current:  { title: "Current (I = V / R)", fields: [["v","Voltage (V)","12"], ["r","Resistance (ohm)","4"]] },
+  voltage:  { title: "Voltage (V = I x R)", fields: [["i","Current (A)","2"], ["r","Resistance (ohm)","5"]] },
+  power:    { title: "Power (P = V x I)", fields: [["v","Voltage (V)","12"], ["i","Current (A)","2"]] },
+  series:   { title: "Resistors in series", fields: [["r","Resistances in ohm, separated by spaces","100 220 330"]] },
+  parallel: { title: "Resistors in parallel", fields: [["r","Resistances in ohm, separated by spaces","100 100"]] },
+  divider:  { title: "Voltage divider", fields: [["vin","Input voltage (V)","12"], ["r1","R1 (ohm)","1k"], ["r2","R2 (ohm)","2k"]] },
+  rc:       { title: "RC circuit (time constant and charging)", fields: [["vs","Supply voltage (V)","5"], ["r","Resistance (ohm)","10k"], ["c","Capacitance (F)","100u"], ["t","Time (s)","1"]] },
+  ripple:   { title: "Rectifier ripple voltage", fields: [["i","Load current (A)","0.5"], ["f","Mains frequency (Hz)","50"], ["c","Smoothing capacitance (F)","2200u"], ["full","Full-wave rectifier? (y/n)","y"]] }
+};
+
+const PY_DISPATCHER = `
+import json
+import sys
+sys.path.insert(0, "/home/pyodide")
+import circuit_calc as cc
+
+def num(text):
+    return cc.parse_value(text)
+
+def numbers(text):
+    return [num(x) for x in text.split()]
+
+def run(kind, raw):
+    f = json.loads(raw)
+    try:
+        if kind == "current":
+            return "Current = {:.4g} A".format(cc.current(num(f["v"]), num(f["r"])))
+        if kind == "voltage":
+            return "Voltage = {:.4g} V".format(cc.voltage(num(f["i"]), num(f["r"])))
+        if kind == "power":
+            return "Power = {:.4g} W".format(cc.power(num(f["v"]), num(f["i"])))
+        if kind == "series":
+            return "Total resistance = {:.4g} ohm".format(cc.series_resistance(numbers(f["r"])))
+        if kind == "parallel":
+            return "Total resistance = {:.4g} ohm".format(cc.parallel_resistance(numbers(f["r"])))
+        if kind == "divider":
+            return "Output voltage = {:.4g} V".format(cc.voltage_divider(num(f["vin"]), num(f["r1"]), num(f["r2"])))
+        if kind == "rc":
+            vs, r, c, t = num(f["vs"]), num(f["r"]), num(f["c"]), num(f["t"])
+            return "Time constant = {:.4g} s\\nCapacitor voltage after {:.4g} s = {:.4g} V".format(
+                cc.rc_time_constant(r, c), t, cc.rc_charge_voltage(vs, r, c, t))
+        if kind == "ripple":
+            full = f["full"].strip().lower() != "n"
+            return "Ripple voltage = {:.4g} V".format(
+                cc.ripple_voltage(num(f["i"]), num(f["f"]), num(f["c"]), full))
+        return "Unknown calculation"
+    except ValueError as error:
+        return "Invalid input: {}".format(error)
+`;
+
+const select = document.getElementById("calc");
+const fieldsDiv = document.getElementById("fields");
+const button = document.getElementById("go");
+const result = document.getElementById("result");
+let pyodide = null;
+
+for (const key in CALCS) {
+  const option = document.createElement("option");
+  option.value = key;
+  option.textContent = CALCS[key].title;
+  select.appendChild(option);
+}
+
+function showFields() {
+  fieldsDiv.innerHTML = "";
+  for (const [id, label, example] of CALCS[select.value].fields) {
+    const l = document.createElement("label");
+    l.textContent = label;
+    l.htmlFor = "f_" + id;
+    const input = document.createElement("input");
+    input.id = "f_" + id;
+    input.value = example;
+    input.autocomplete = "off";
+    fieldsDiv.appendChild(l);
+    fieldsDiv.appendChild(input);
+  }
+  result.textContent = "";
+}
+select.addEventListener("change", showFields);
+showFields();
+
+function calculate() {
+  const values = {};
+  for (const [id] of CALCS[select.value].fields) {
+    values[id] = document.getElementById("f_" + id).value;
+  }
+  pyodide.globals.set("kind", select.value);
+  pyodide.globals.set("raw", JSON.stringify(values));
+  try {
+    result.textContent = pyodide.runPython("run(kind, raw)");
+  } catch (error) {
+    result.textContent = "Invalid input: " + error.message.split("\n").slice(-2)[0];
+  }
+}
+
+async function start() {
+  try {
+    pyodide = await loadPyodide();
+    const response = await fetch("circuit_calc.py");
+    if (!response.ok) { throw new Error("circuit_calc.py not found"); }
+    pyodide.FS.writeFile("/home/pyodide/circuit_calc.py", await response.text());
+    pyodide.runPython(PY_DISPATCHER);
+    button.textContent = "Calculate";
+    button.disabled = false;
+    button.addEventListener("click", calculate);
+  } catch (error) {
+    button.textContent = "Could not load Python";
+    result.textContent = "Error: " + error.message;
+  }
+}
+start();
+</script>
+</body>
+</html>
